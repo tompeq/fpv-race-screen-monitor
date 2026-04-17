@@ -675,6 +675,21 @@ class ScreenMonitor:
             cell_h = 1080
         return max(cell_w, 40), max(cell_h, 25)
 
+    def _resize_frame_image(self, img: Image.Image, max_width: int, max_height: int) -> Image.Image:
+        if img.width <= 0 or img.height <= 0:
+            return img
+
+        scale = min(max_width / img.width, max_height / img.height)
+        scale = max(scale, 0.01)
+        new_size = (
+            max(1, int(round(img.width * scale))),
+            max(1, int(round(img.height * scale))),
+        )
+
+        if new_size == img.size:
+            return img
+        return img.resize(new_size, Image.BILINEAR)
+
     def _create_agent_widget(self, name: str) -> tuple:
         frame = tk.Frame(
             self.grid_frame,
@@ -684,6 +699,7 @@ class ScreenMonitor:
             highlightbackground="#2a2a2a",
             highlightthickness=1,
         )
+        frame.grid_propagate(False)
 
         header = tk.Frame(frame, bg="#161616", height=48)
         header.pack(fill=tk.X)
@@ -811,7 +827,7 @@ class ScreenMonitor:
                     continue
                 try:
                     img = Image.open(io.BytesIO(img_data))
-                    img.thumbnail((cell_w - 8, cell_h - 8), Image.BILINEAR)
+                    img = self._resize_frame_image(img, max(cell_w - 8, 1), max(cell_h - 8, 1))
                     photo = ImageTk.PhotoImage(img)
                     self.photo_images[name] = photo
                     _, _, _, img_label = self.agent_widgets[name]

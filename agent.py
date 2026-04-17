@@ -79,12 +79,17 @@ class TimerOCR:
         font_files = [
             "arial.ttf",
             "arialbd.ttf",
+            "ariali.ttf",
+            "arialbi.ttf",
             "consola.ttf",
             "consolab.ttf",
+            "consolai.ttf",
             "segoeui.ttf",
             "segoeuib.ttf",
+            "segoeuii.ttf",
             "tahoma.ttf",
             "verdanab.ttf",
+            "verdanai.ttf",
         ]
         font_sizes = [56, 64, 72, 84]
 
@@ -113,6 +118,8 @@ class TimerOCR:
             cv2.FONT_HERSHEY_SIMPLEX,
             cv2.FONT_HERSHEY_DUPLEX,
             cv2.FONT_HERSHEY_TRIPLEX,
+            cv2.FONT_HERSHEY_DUPLEX | cv2.FONT_ITALIC,
+            cv2.FONT_HERSHEY_TRIPLEX | cv2.FONT_ITALIC,
         ]
         for font_face in hershey_fonts:
             for scale in [1.5, 1.8, 2.2]:
@@ -165,6 +172,12 @@ class TimerOCR:
         canvas[offset_y:offset_y + new_h, offset_x:offset_x + new_w] = resized
         return canvas
 
+    def _trim_binary(self, binary: "np.ndarray") -> "np.ndarray | None":
+        ys, xs = np.where(binary > 0)
+        if len(xs) == 0:
+            return None
+        return binary[ys.min():ys.max() + 1, xs.min():xs.max() + 1]
+
     def _column_groups(self, binary: "np.ndarray") -> list[tuple[int, int]]:
         projection = (binary > 0).sum(axis=0)
         threshold = max(1, int(binary.shape[0] * 0.04))
@@ -181,6 +194,176 @@ class TimerOCR:
             groups.append((start, len(projection)))
         return groups
 
+    def _row_groups(self, binary: "np.ndarray") -> list[tuple[int, int]]:
+        projection = (binary > 0).sum(axis=1)
+        threshold = max(1, int(binary.shape[1] * 0.02))
+
+        groups: list[tuple[int, int]] = []
+        start = None
+        for index, value in enumerate(projection):
+            if value > threshold and start is None:
+                start = index
+            elif value <= threshold and start is not None:
+                groups.append((start, index))
+                start = None
+        if start is not None:
+            groups.append((start, len(projection)))
+        return groups
+
+    def _group_metrics(self, binary: "np.ndarray", groups: list[tuple[int, int]]) -> list[dict[str, int]]:
+        metrics: list[dict[str, int]] = []
+        for x1, x2 in groups:
+            char_img = binary[:, x1:x2]
+            ys, xs = np.where(char_img > 0)
+            if len(xs) == 0:
+                continue
+            metrics.append(
+                {
+                    "x1": int(x1),
+                    "x2": int(x2),
+                    "width": int(x2 - x1),
+                    "height": int(ys.max() - ys.min() + 1),
+                }
+            )
+        return metrics
+
+    def _iter_row_slices(self, row_binary: "np.ndarray") -> list["np.ndarray"]:
+        trimmed = self._trim_binary(row_binary)
+        if trimmed is None:
+            return []
+
+        slices = [trimmed]
+        groups = self._column_groups(trimmed)
+        metrics = self._group_metrics(trimmed, groups)
+        if not metrics:
+            return slices
+
+        max_height = max(metric["height"] for metric in metrics)
+        tall_indexes = [index for index, metric in enumerate(metrics) if metric["height"] >= max_height * 0.78]
+        if not tall_indexes:
+            return slices
+
+        cluster_start = tall_indexes[0]
+        cluster_end = tall_indexes[0]
+        clusters: list[tuple[int, int]] = []
+        for index in tall_indexes[1:]:
+            if index - cluster_end <= 2:
+                cluster_end = index
+            else:
+                clusters.append((cluster_start, cluster_end))
+                cluster_start = index
+                cluster_end = index
+        clusters.append((cluster_start, cluster_end))
+
+        for start, end in clusters:
+            left_index = max(0, start - 1)
+            right_index = min(len(groups) - 1, end + 1)
+            x1 = max(0, groups[left_index][0] - 14)
+            x2 = min(trimmed.shape[1], groups[right_index][1] + 14)
+            focused = self._trim_binary(trimmed[:, x1:x2])
+            if focused is None:
+                continue
+            if any(focused.shape == existing.shape and np.array_equal(focused, existing) for existing in slices):
+                continue
+            slices.insert(0, focused)
+
+        return slices
+
+    def _find_split_point(
+        self,
+        binary: "np.ndarray",
+        group: tuple[int, int],
+        median_width: int,
+    ) -> int | None:
+        x1, x2 = group
+        width = x2 - x1
+        min_width = max(6, int(median_width * 0.35))
+        if width < max(20, int(median_width * 1.25)) or width < min_width * 2:
+            return None
+
+        projection = (binary[:, x1:x2] > 0).sum(axis=0).astype(np.float32)
+        if len(projection) < min_width * 2:
+            return None
+
+        kernel = np.array([1, 2, 3, 2, 1], dtype=np.float32)
+        kernel /= kernel.sum()
+        smooth = np.convolve(projection, kernel, mode="same")
+
+        best_pos = None
+        best_value = None
+        for pos in range(min_width, len(smooth) - min_width):
+            valley = float(smooth[max(0, pos - 1):min(len(smooth), pos + 2)].mean())
+            if best_value is None or valley < best_value:
+                best_pos = pos
+                best_value = valley
+
+        if best_pos is None or best_value is None:
+            return None
+        if best_value > max(4.0, float(smooth.max()) * 0.78):
+            return None
+        return x1 + best_pos
+
+    def _expand_groups(
+        self,
+        binary: "np.ndarray",
+        groups: list[tuple[int, int]],
+        target_count: int = 8,
+    ) -> list[tuple[int, int]]:
+        refined = [(int(x1), int(x2)) for x1, x2 in groups if x2 > x1]
+
+        while len(refined) < target_count:
+            widths = sorted(x2 - x1 for x1, x2 in refined)
+            if not widths:
+                break
+            median_width = widths[len(widths) // 2]
+
+            split_done = False
+            for index, group in sorted(
+                enumerate(refined),
+                key=lambda item: item[1][1] - item[1][0],
+                reverse=True,
+            ):
+                split_at = self._find_split_point(binary, group, median_width)
+                if split_at is None:
+                    continue
+                refined = refined[:index] + [(group[0], split_at), (split_at, group[1])] + refined[index + 1:]
+                split_done = True
+                break
+
+            if not split_done:
+                break
+
+        return refined
+
+    def _evaluate_groups(self, binary: "np.ndarray", groups: list[tuple[int, int]]) -> tuple[str | None, float, float]:
+        chars: list[str] = []
+        scores: list[float] = []
+        heights: list[float] = []
+
+        for index, (x1, x2) in enumerate(groups):
+            char_img = binary[:, x1:x2]
+            cys, cxs = np.where(char_img > 0)
+            if len(cxs) == 0:
+                return None, -1.0, 0.0
+
+            heights.append(float(cys.max() - cys.min() + 1))
+            char_img = char_img[cys.min():cys.max() + 1, cxs.min():cxs.max() + 1]
+            char_img = self._normalize_char(char_img)
+
+            char, score = self._classify_char(char_img, TIME_POSITIONS[index])
+            if not char:
+                return None, -1.0, 0.0
+            chars.append(char)
+            scores.append(score)
+
+        text = "".join(chars)
+        if not TIME_PATTERN.match(text):
+            return None, -1.0, 0.0
+
+        sorted_heights = sorted(heights)
+        median_height = sorted_heights[len(sorted_heights) // 2]
+        return text, sum(scores) / len(scores), median_height
+
     def _classify_char(self, char_img: "np.ndarray", allowed_chars: list[str]) -> tuple[str, float]:
         best_char = ""
         best_score = -1.0
@@ -195,45 +378,58 @@ class TimerOCR:
     def _decode_variant(self, binary: "np.ndarray") -> tuple[str | None, float]:
         best_text = None
         best_score = -1.0
+        best_rank = -1.0
+        work = self._trim_binary(binary)
+        if work is None:
+            return None, -1.0
 
-        for dilation in [0, 1, 2, 3]:
-            work = binary
-            if dilation:
-                kernel = np.ones((1, dilation + 1), dtype=np.uint8)
-                work = cv2.dilate(work, kernel, iterations=1)
+        variants = [work]
+        for size in [2, 3]:
+            kernel = np.ones((1, size), dtype=np.uint8)
 
-            ys, xs = np.where(work > 0)
-            if len(xs) == 0:
-                continue
-            work = work[ys.min():ys.max() + 1, xs.min():xs.max() + 1]
+            eroded = self._trim_binary(cv2.erode(work, kernel, iterations=1))
+            if eroded is not None:
+                variants.append(eroded)
 
-            groups = self._column_groups(work)
-            if len(groups) != 8:
-                continue
+            dilated = self._trim_binary(cv2.dilate(work, kernel, iterations=1))
+            if dilated is not None:
+                variants.append(dilated)
 
-            chars: list[str] = []
-            scores: list[float] = []
+        for variant in variants:
+            row_groups = self._row_groups(variant)
+            if not row_groups:
+                row_groups = [(0, variant.shape[0])]
 
-            for index, (x1, x2) in enumerate(groups):
-                char_img = work[:, x1:x2]
-                cys, cxs = np.where(char_img > 0)
-                if len(cxs) == 0:
-                    chars = []
-                    break
-                char_img = char_img[cys.min():cys.max() + 1, cxs.min():cxs.max() + 1]
-                char_img = self._normalize_char(char_img)
-                char, score = self._classify_char(char_img, TIME_POSITIONS[index])
-                chars.append(char)
-                scores.append(score)
+            for row_index, (y1, y2) in enumerate(row_groups):
+                row_img = self._trim_binary(variant[y1:y2, :])
+                if row_img is None:
+                    continue
 
-            if len(chars) != 8:
-                continue
+                for slice_img in self._iter_row_slices(row_img):
+                    groups = self._column_groups(slice_img)
+                    if not groups:
+                        continue
 
-            text = "".join(chars)
-            score = sum(scores) / len(scores)
-            if TIME_PATTERN.match(text) and score > best_score:
-                best_text = text
-                best_score = score
+                    if len(groups) < 8:
+                        groups = self._expand_groups(slice_img, groups, 8)
+
+                    if len(groups) < 8:
+                        continue
+
+                    candidates = [groups]
+                    if len(groups) > 8:
+                        candidates = [groups[start:start + 8] for start in range(len(groups) - 7)]
+
+                    for candidate in candidates:
+                        text, score, median_height = self._evaluate_groups(slice_img, candidate)
+                        if not text:
+                            continue
+
+                        rank = score + min(median_height, 160.0) / 500.0 - row_index * 0.01
+                        if rank > best_rank or (abs(rank - best_rank) < 1e-6 and score > best_score):
+                            best_text = text
+                            best_score = score
+                            best_rank = rank
 
         return best_text, best_score
 
@@ -253,7 +449,7 @@ class TimerOCR:
 
         crop = image.crop((x, y, x + width, y + height)).convert("L")
         gray = np.array(crop)
-        scale = max(2, int(round(140 / max(gray.shape[0], 1))))
+        scale = max(2, int(round(180 / max(gray.shape[0], 1))))
         gray = cv2.resize(gray, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
         gray = cv2.GaussianBlur(gray, (3, 3), 0)
 
@@ -279,7 +475,7 @@ class TimerOCR:
                 best_text = text
                 best_score = score
 
-        if best_text and best_score >= 0.45:
+        if best_text and best_score >= 0.72:
             return best_text, f"OCR: {best_score:.2f}"
         return None, "Число не найдено"
 
