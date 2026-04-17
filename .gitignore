@@ -1,0 +1,11 @@
+build/
+dist/
+dump/
+dump2/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.spec
+agent_config.json
+monitor_test copy.py
