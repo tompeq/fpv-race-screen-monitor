@@ -559,6 +559,9 @@ class ScreenAgent:
         self.no_text_streak = 0
         self.next_ocr_check_at = 0.0
         self.pending_result_time = ""
+        self.repeat_result_interval = 2.0
+        self.next_repeat_emit_at = 0.0
+        self.last_emitted_result_text = ""
 
         self._ocr_jobs: queue.Queue[Image.Image | None] = queue.Queue(maxsize=1)
         self._ocr_results: queue.Queue[tuple[str | None, str]] = queue.Queue(maxsize=1)
@@ -636,6 +639,7 @@ class ScreenAgent:
             self.current_time_text = time_text
             self.current_time_status = status
             self.no_text_streak = 0
+            now = time.time()
 
             if time_text == self.last_seen_text:
                 self.stable_count += 1
@@ -643,10 +647,19 @@ class ScreenAgent:
                 self.last_seen_text = time_text
                 self.stable_count = 1
 
-            if self.result_armed and self.stable_count >= 2:
+            if self.result_armed and self.stable_count >= 1:
                 self.pending_result_time = time_text
                 self.result_armed = False
+                self.last_emitted_result_text = time_text
+                self.next_repeat_emit_at = now + self.repeat_result_interval
                 self.current_time_status = f"Результат отправлен: {time_text}"
+            elif (
+                not self.result_armed
+                and time_text == self.last_emitted_result_text
+                and now >= self.next_repeat_emit_at
+            ):
+                self.pending_result_time = time_text
+                self.next_repeat_emit_at = now + self.repeat_result_interval
         else:
             self.current_time_text = ""
             self.current_time_status = status
@@ -655,6 +668,8 @@ class ScreenAgent:
             self.no_text_streak += 1
             if self.no_text_streak >= 2:
                 self.result_armed = True
+                self.last_emitted_result_text = ""
+                self.next_repeat_emit_at = 0.0
 
         self._notify_time_update()
 
@@ -926,10 +941,10 @@ class AgentGUI:
             "fps": 30,
             "quality": 50,
             "max_width": 960,
-            "timer_x": 0,
-            "timer_y": 0,
-            "timer_width": 0,
-            "timer_height": 0,
+            "timer_x": 1060,
+            "timer_y": 85,
+            "timer_width": 360,
+            "timer_height": 120,
         }
         if os.path.exists(self.config_path):
             try:
@@ -938,6 +953,13 @@ class AgentGUI:
                 defaults.update(saved)
             except Exception:
                 pass
+
+        if defaults.get("timer_width", 0) <= 0 or defaults.get("timer_height", 0) <= 0:
+            defaults["timer_x"] = 1060
+            defaults["timer_y"] = 85
+            defaults["timer_width"] = 360
+            defaults["timer_height"] = 120
+
         return defaults
 
     def _save_config(self):
