@@ -1,12 +1,12 @@
 ﻿"""
-Screen Monitor Agent - Р·Р°РїСѓСЃРєР°РµС‚СЃСЏ РЅР° РєР°Р¶РґРѕРј РєРѕРјРїСЊСЋС‚РµСЂРµ РІ СЃРµС‚Рё.
-РџРµСЂРёРѕРґРёС‡РµСЃРєРё Р·Р°С…РІР°С‚С‹РІР°РµС‚ СЃРєСЂРёРЅС€РѕС‚, РѕС‚РїСЂР°РІР»СЏРµС‚ РµРіРѕ РЅР° СЃРµСЂРІРµСЂ-РјРѕРЅРёС‚РѕСЂ
-Рё СЂР°Р· РІ СЃРµРєСѓРЅРґСѓ РїС‹С‚Р°РµС‚СЃСЏ СЂР°СЃРїРѕР·РЅР°С‚СЊ РІСЂРµРјСЏ РІ Р·Р°СЂР°РЅРµРµ Р·Р°РґР°РЅРЅРѕР№ РѕР±Р»Р°СЃС‚Рё.
+Screen Monitor Agent - запускается на каждом компьютере в сети.
+Периодически захватывает скриншот, отправляет его на сервер-монитор
+и раз в секунду пытается распознать время в заранее заданной области.
 
-Р—Р°РІРёСЃРёРјРѕСЃС‚Рё:
+Зависимости:
     pip install Pillow mss numpy opencv-python
 
-РСЃРїРѕР»СЊР·РѕРІР°РЅРёРµ:
+Использование:
     python agent.py
 """
 
@@ -28,7 +28,7 @@ from typing import Callable
 try:
     import mss
 except ImportError:
-    print("РЈСЃС‚Р°РЅРѕРІРёС‚Рµ mss: pip install mss")
+    print("Установите mss: pip install mss")
     sys.exit(1)
 
 try:
@@ -41,7 +41,7 @@ except ImportError:
 try:
     from PIL import Image, ImageDraw, ImageFont
 except ImportError:
-    print("РЈСЃС‚Р°РЅРѕРІРёС‚Рµ Pillow: pip install Pillow")
+    print("Установите Pillow: pip install Pillow")
     sys.exit(1)
 
 
@@ -63,7 +63,7 @@ def clamp(value: int, min_value: int, max_value: int) -> int:
 
 
 class TimerOCR:
-    """РџСЂРѕСЃС‚РѕР№ OCR РїРѕРґ С„РѕСЂРјР°С‚ m:ss.mmm Р±РµР· РІРЅРµС€РЅРµРіРѕ РґРІРёР¶РєР° OCR."""
+    """Простой OCR под формат m:ss.mmm без внешнего движка OCR."""
 
     def __init__(self):
         self.available = cv2 is not None and np is not None
@@ -476,11 +476,11 @@ class TimerOCR:
 
     def read_time(self, image: Image.Image, region: tuple[int, int, int, int]) -> tuple[str | None, str]:
         if not self.available:
-            return None, "OCR РЅРµРґРѕСЃС‚СѓРїРµРЅ: РЅСѓР¶РЅС‹ numpy Рё opencv-python"
+            return None, "OCR недоступен: нужны numpy и opencv-python"
 
         x, y, width, height = region
         if width <= 0 or height <= 0:
-            return None, "Р—Р°РґР°Р№С‚Рµ РѕР±Р»Р°СЃС‚СЊ С‚Р°Р№РјРµСЂР°"
+            return None, "Задайте область таймера"
 
         img_w, img_h = image.size
         x = clamp(x, 0, max(img_w - 1, 0))
@@ -524,7 +524,7 @@ class TimerOCR:
 
         if best_text and best_score >= 0.72:
             return best_text, f"OCR: {best_score:.2f}"
-        return None, "Р§РёСЃР»Рѕ РЅРµ РЅР°Р№РґРµРЅРѕ"
+        return None, "Число не найдено"
 
 
 class ScreenAgent:
@@ -552,7 +552,7 @@ class ScreenAgent:
         self.timer_ocr = TimerOCR()
         self.time_callback: Callable[[str, str], None] | None = None
         self.current_time_text = ""
-        self.current_time_status = "РћР¶РёРґР°РЅРёРµ OCR"
+        self.current_time_status = "Ожидание OCR"
         self.last_seen_text = ""
         self.stable_count = 0
         self.result_armed = True
@@ -646,7 +646,7 @@ class ScreenAgent:
             if self.result_armed and self.stable_count >= 2:
                 self.pending_result_time = time_text
                 self.result_armed = False
-                self.current_time_status = f"Result sent: {time_text}"
+                self.current_time_status = f"Результат отправлен: {time_text}"
         else:
             self.current_time_text = ""
             self.current_time_status = status
@@ -673,7 +673,7 @@ class ScreenAgent:
         self._apply_ocr_result(time_text, status)
 
     def capture_screen(self, sct) -> tuple[bytes, Image.Image]:
-        """Р—Р°С…РІР°С‚С‹РІР°РµС‚ СЌРєСЂР°РЅ Рё РІРѕР·РІСЂР°С‰Р°РµС‚ JPEG-Р±Р°Р№С‚С‹ Рё РёСЃС…РѕРґРЅРѕРµ РёР·РѕР±СЂР°Р¶РµРЅРёРµ."""
+        """Захватывает экран и возвращает JPEG-байты и исходное изображение."""
         monitor = sct.monitors[1]
         screenshot = sct.grab(monitor)
         full_img = Image.frombytes("RGB", screenshot.size, screenshot.bgra, "raw", "BGRX")
@@ -757,7 +757,7 @@ class AgentGUI:
 
         self.status_label = tk.Label(
             top,
-            text="РћС‚РєР»СЋС‡С‘РЅ",
+            text="Отключён",
             font=("Segoe UI", 9),
             fg="#666666",
             bg="#111111",
@@ -766,7 +766,7 @@ class AgentGUI:
 
         self.connect_btn = tk.Button(
             top,
-            text="РџРѕРґРєР»СЋС‡РёС‚СЊ",
+            text="Подключить",
             font=("Segoe UI", 9),
             width=14,
             command=self.toggle_connect,
@@ -785,12 +785,12 @@ class AgentGUI:
         body.pack(fill=tk.BOTH, expand=True, padx=20, pady=16)
 
         fields = [
-            ("РЎРµСЂРІРµСЂ", "server_host", self.settings.get("server_host", "10.0.201.82")),
-            ("РџРѕСЂС‚", "server_port", str(self.settings.get("server_port", 9900))),
-            ("РРјСЏ", "name", self.settings.get("name", socket.gethostname())),
+            ("Сервер", "server_host", self.settings.get("server_host", "10.0.201.82")),
+            ("Порт", "server_port", str(self.settings.get("server_port", 9900))),
+            ("Имя", "name", self.settings.get("name", socket.gethostname())),
             ("FPS", "fps", str(self.settings.get("fps", 30))),
-            ("РљР°С‡РµСЃС‚РІРѕ JPEG", "quality", str(self.settings.get("quality", 50))),
-            ("РњР°РєСЃ. С€РёСЂРёРЅР°", "max_width", str(self.settings.get("max_width", 960))),
+            ("Качество JPEG", "quality", str(self.settings.get("quality", 50))),
+            ("Макс. ширина", "max_width", str(self.settings.get("max_width", 960))),
         ]
 
         self.entries: dict[str, tk.Entry] = {}
@@ -825,7 +825,7 @@ class AgentGUI:
 
         tk.Label(
             body,
-            text="РћР±Р»Р°СЃС‚СЊ С‚Р°Р№РјРµСЂР° РЅР° СЌРєСЂР°РЅРµ",
+            text="Область таймера на экране",
             fg="#aaaaaa",
             bg="#0a0a0a",
             font=("Segoe UI", 10, "bold"),
@@ -835,8 +835,8 @@ class AgentGUI:
         region_fields = [
             ("X", "timer_x", str(self.settings.get("timer_x", 0))),
             ("Y", "timer_y", str(self.settings.get("timer_y", 0))),
-            ("РЁРёСЂРёРЅР°", "timer_width", str(self.settings.get("timer_width", 0))),
-            ("Р’С‹СЃРѕС‚Р°", "timer_height", str(self.settings.get("timer_height", 0))),
+            ("Ширина", "timer_width", str(self.settings.get("timer_width", 0))),
+            ("Высота", "timer_height", str(self.settings.get("timer_height", 0))),
         ]
 
         for label_text, key, default_val in region_fields:
@@ -873,7 +873,7 @@ class AgentGUI:
 
         tk.Label(
             info_card,
-            text="Р Р°СЃРїРѕР·РЅР°РЅРЅРѕРµ РІСЂРµРјСЏ",
+            text="Распознанное время",
             fg="#888888",
             bg="#111111",
             font=("Segoe UI", 9),
@@ -891,7 +891,7 @@ class AgentGUI:
 
         self.timer_status_label = tk.Label(
             info_card,
-            text="РќР°СЃС‚СЂРѕР№С‚Рµ РѕР±Р»Р°СЃС‚СЊ С‚Р°Р№РјРµСЂР°",
+            text="Настройте область таймера",
             fg="#666666",
             bg="#111111",
             font=("Segoe UI", 8),
@@ -904,7 +904,7 @@ class AgentGUI:
 
         tk.Button(
             bottom,
-            text="РЎРѕС…СЂР°РЅРёС‚СЊ",
+            text="Сохранить",
             command=self.save_settings,
             bg="#222222",
             fg="#cccccc",
@@ -952,13 +952,13 @@ class AgentGUI:
         self.timer_value_label.configure(text=shown_time)
 
         color = "#666666"
-        if "Р РµР·СѓР»СЊС‚Р°С‚ РѕС‚РїСЂР°РІР»РµРЅ" in status_text or status_text.startswith("Result sent:"):
+        if "Результат отправлен" in status_text or status_text.startswith("Result sent:"):
             color = "#a6e3a1"
         elif status_text.startswith("OCR:"):
             color = "#89b4fa"
-        elif "РЅРµ РЅР°Р№РґРµРЅРѕ" in status_text:
+        elif "не найдено" in status_text:
             color = "#f9e2af"
-        elif "РЅРµРґРѕСЃС‚СѓРїРµРЅ" in status_text or "Р—Р°РґР°Р№С‚Рµ" in status_text:
+        elif "недоступен" in status_text or "Задайте" in status_text:
             color = "#f38ba8"
 
         self.timer_status_label.configure(text=status_text, fg=color)
@@ -977,11 +977,11 @@ class AgentGUI:
             self.settings["timer_height"] = max(0, int(self.entries["timer_height"].get().strip()))
             self._save_config()
             if self.settings["timer_width"] > 0 and self.settings["timer_height"] > 0:
-                self._set_timer_display("", "РћР±Р»Р°СЃС‚СЊ СЃРѕС…СЂР°РЅРµРЅР°, Р¶РґС‘Рј OCR")
+                self._set_timer_display("", "Область сохранена, ждём OCR")
             else:
-                self._set_timer_display("", "Р—Р°РґР°Р№С‚Рµ РѕР±Р»Р°СЃС‚СЊ С‚Р°Р№РјРµСЂР°")
+                self._set_timer_display("", "Задайте область таймера")
         except ValueError:
-            self._set_timer_display("", "РџСЂРѕРІРµСЂСЊС‚Рµ С‡РёСЃР»РѕРІС‹Рµ РїРѕР»СЏ")
+            self._set_timer_display("", "Проверьте числовые поля")
 
     def toggle_connect(self):
         if self.connected:
@@ -1009,8 +1009,8 @@ class AgentGUI:
         self.agent.running = True
 
         self.connected = True
-        self.connect_btn.configure(text="РћС‚РєР»СЋС‡РёС‚СЊ", fg="#f38ba8")
-        self.status_label.configure(text="РџРѕРґРєР»СЋС‡РµРЅРёРµ...", fg="#aaaaaa")
+        self.connect_btn.configure(text="Отключить", fg="#f38ba8")
+        self.status_label.configure(text="Подключение...", fg="#aaaaaa")
         self.agent_thread = threading.Thread(target=self._agent_loop, daemon=True)
         self.agent_thread.start()
 
@@ -1018,8 +1018,8 @@ class AgentGUI:
         if self.agent:
             self.agent.stop()
         self.connected = False
-        self.connect_btn.configure(text="РџРѕРґРєР»СЋС‡РёС‚СЊ", fg="#999999")
-        self.status_label.configure(text="РћС‚РєР»СЋС‡С‘РЅ", fg="#666666")
+        self.connect_btn.configure(text="Подключить", fg="#999999")
+        self.status_label.configure(text="Отключён", fg="#666666")
         self.fps_display.configure(text="")
 
     def _agent_loop(self):
@@ -1036,7 +1036,7 @@ class AgentGUI:
                 sock.connect((self.agent.server_host, self.agent.server_port))
                 sock.settimeout(None)
 
-                self.root.after(0, lambda: self.status_label.configure(text="РџРѕРґРєР»СЋС‡С‘РЅ", fg="#a6e3a1"))
+                self.root.after(0, lambda: self.status_label.configure(text="Подключён", fg="#a6e3a1"))
 
                 with mss.mss() as sct:
                     while self.connected and self.agent and self.agent.running:
@@ -1062,7 +1062,7 @@ class AgentGUI:
                             fps_timer = now
 
             except (ConnectionRefusedError, ConnectionResetError, BrokenPipeError, OSError):
-                self.root.after(0, lambda: self.status_label.configure(text="РџРµСЂРµРїРѕРґРєР»СЋС‡РµРЅРёРµ...", fg="#f9e2af"))
+                self.root.after(0, lambda: self.status_label.configure(text="Переподключение...", fg="#f9e2af"))
                 time.sleep(3)
             finally:
                 if sock is not None:
@@ -1071,7 +1071,7 @@ class AgentGUI:
                     except Exception:
                         pass
 
-        self.root.after(0, lambda: self.status_label.configure(text="РћС‚РєР»СЋС‡С‘РЅ", fg="#666666"))
+        self.root.after(0, lambda: self.status_label.configure(text="Отключён", fg="#666666"))
 
     def on_close(self):
         self.connected = False
