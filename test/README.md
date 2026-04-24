@@ -4,6 +4,7 @@ Recommended top-timer region for the provided screenshot:
 
 - Resolution: `1919x1079`
 - Region: `x=1060, y=85, w=360, h=120`
+- Expected value: `1:15.585`
 
 Practical config for game window `1920x1080`:
 

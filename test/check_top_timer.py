@@ -26,7 +26,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--h", type=int, default=120)
     parser.add_argument(
         "--expected",
-        default="0:27.569",
+        default="1:15.585",
         help="Expected timer text for this test image.",
     )
     parser.add_argument(

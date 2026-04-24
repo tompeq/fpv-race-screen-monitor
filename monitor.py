@@ -129,14 +129,17 @@ class ScreenMonitor:
     def __init__(self, port: int = 9900, columns: int = 3, fps: int = 30):
         self.port = port
         self.columns = columns
-        self.refresh_ms = max(1000 // fps, 16)
+        self.target_fps = max(1, fps)
+        self.refresh_ms = max(1000 // self.target_fps, 16)
         self.frames: OrderedDict[str, bytes] = OrderedDict()
         self.dirty: set[str] = set()
         self.photo_images: dict[str, ImageTk.PhotoImage] = {}
+        self.last_rendered_at: dict[str, float] = {}
         self.connections: list[AgentConnection] = []
         self.lock = threading.Lock()
         self.running = True
         self._last_cell_size = (0, 0)
+        self._last_layout_names: tuple[str, ...] = ()
 
         self.display_names: dict[str, str] = {}
         self.zoom_factor: float = 1.0
@@ -701,6 +704,18 @@ class ScreenMonitor:
             return img
         return img.resize(new_size, Image.BILINEAR)
 
+    def _render_interval_for_count(self, agent_count: int) -> float:
+        if agent_count <= self.columns:
+            fps_cap = 24
+        elif agent_count <= self.columns * 2:
+            fps_cap = 18
+        else:
+            fps_cap = 12
+        return 1.0 / max(1, min(self.target_fps, fps_cap))
+
+    def _max_renders_per_tick(self, agent_count: int) -> int:
+        return max(1, min(agent_count, self.columns * 2))
+
     def _create_agent_widget(self, name: str) -> tuple:
         frame = tk.Frame(
             self.grid_frame,
@@ -789,9 +804,6 @@ class ScreenMonitor:
 
         with self.lock:
             names = list(self.frames.keys())
-            dirty_names = set(self.dirty)
-            self.dirty.clear()
-            dirty_frames = {name: self.frames[name] for name in dirty_names if name in self.frames}
             live_times = dict(self.agent_live_times)
             accepted_times = dict(self.agent_last_results)
             best_name = self.best_result_name
@@ -801,10 +813,12 @@ class ScreenMonitor:
         current_w, current_h = self._last_cell_size
         size_changed = abs(cell_w - current_w) > 4 or abs(cell_h - current_h) > 4
         self._last_cell_size = (cell_w, cell_h)
+        layout_names = tuple(names)
+        layout_changed = size_changed or layout_names != self._last_layout_names
 
         if size_changed:
             with self.lock:
-                dirty_frames = dict(self.frames)
+                self.dirty.update(self.frames.keys())
 
         for name in names:
             if name not in self.agent_widgets:
@@ -822,17 +836,35 @@ class ScreenMonitor:
                 if meta_label.cget("text") != meta_text or meta_label.cget("fg") != meta_color:
                     meta_label.configure(text=meta_text, fg=meta_color)
 
-        for index, name in enumerate(names):
-            row, col = divmod(index, self.columns)
-            frame, _, _, _ = self.agent_widgets[name]
-            frame.grid(row=row, column=col, padx=6, pady=6, sticky="nsew")
-            if size_changed:
+        if layout_changed:
+            for index, name in enumerate(names):
+                row, col = divmod(index, self.columns)
+                frame, _, _, _ = self.agent_widgets[name]
+                frame.grid(row=row, column=col, padx=6, pady=6, sticky="nsew")
                 frame.configure(width=cell_w, height=cell_h + 48)
 
-        for column in range(self.columns):
-            self.grid_frame.columnconfigure(column, weight=1)
+            for column in range(self.columns):
+                self.grid_frame.columnconfigure(column, weight=1)
+            self._last_layout_names = layout_names
 
+        dirty_frames = {}
         if not self.drag_active:
+            render_now = time.time()
+            render_interval = self._render_interval_for_count(len(names))
+            max_renders = self._max_renders_per_tick(len(names))
+
+            with self.lock:
+                ready_names = [
+                    name
+                    for name in names
+                    if name in self.dirty and render_now - self.last_rendered_at.get(name, 0.0) >= render_interval
+                ]
+                ready_names.sort(key=lambda name: self.last_rendered_at.get(name, 0.0))
+                ready_names = ready_names[:max_renders]
+                for name in ready_names:
+                    self.dirty.discard(name)
+                dirty_frames = {name: self.frames[name] for name in ready_names if name in self.frames}
+
             for name, img_data in dirty_frames.items():
                 if name not in self.agent_widgets:
                     continue
@@ -843,6 +875,7 @@ class ScreenMonitor:
                     self.photo_images[name] = photo
                     _, _, _, img_label = self.agent_widgets[name]
                     img_label.configure(image=photo)
+                    self.last_rendered_at[name] = render_now
                 except Exception:
                     pass
 

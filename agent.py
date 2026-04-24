@@ -69,8 +69,10 @@ class TimerOCR:
         self.available = cv2 is not None and np is not None
         self.template_size = (32, 48)
         self.templates: dict[str, list[np.ndarray]] = {}
+        self.template_vectors: dict[str, np.ndarray] = {}
         if self.available:
             self.templates = self._build_templates()
+            self.template_vectors = self._build_template_vectors(self.templates)
             self.available = any(self.templates.values())
 
     def _build_templates(self) -> dict[str, list[np.ndarray]]:
@@ -144,6 +146,21 @@ class TimerOCR:
                         templates[char].append(self._normalize_char(binary))
 
         return templates
+
+    def _build_template_vectors(self, templates: dict[str, list["np.ndarray"]]) -> dict[str, "np.ndarray"]:
+        vectors: dict[str, np.ndarray] = {}
+        for char, char_templates in templates.items():
+            normalized_templates = []
+            for template in char_templates:
+                vector = template.astype(np.float32).reshape(-1)
+                std = float(vector.std())
+                if std <= 1e-6:
+                    continue
+                vector = (vector - float(vector.mean())) / std
+                normalized_templates.append(vector)
+            if normalized_templates:
+                vectors[char] = np.vstack(normalized_templates)
+        return vectors
 
     def _threshold(self, gray: "np.ndarray") -> "np.ndarray":
         _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
@@ -368,12 +385,21 @@ class TimerOCR:
     def _classify_char(self, char_img: "np.ndarray", allowed_chars: list[str]) -> tuple[str, float]:
         best_char = ""
         best_score = -1.0
+        vector = char_img.astype(np.float32).reshape(-1)
+        std = float(vector.std())
+        if std <= 1e-6:
+            return best_char, best_score
+        vector = (vector - float(vector.mean())) / std
+
         for char in allowed_chars:
-            for template in self.templates.get(char, []):
-                score = float(cv2.matchTemplate(char_img, template, cv2.TM_CCOEFF_NORMED)[0][0])
-                if score > best_score:
-                    best_char = char
-                    best_score = score
+            templates = self.template_vectors.get(char)
+            if templates is None:
+                continue
+            scores = templates @ vector / vector.size
+            score = float(scores.max())
+            if score > best_score:
+                best_char = char
+                best_score = score
         return best_char, best_score
 
     def _decode_fast_variant(self, binary: "np.ndarray") -> tuple[str | None, float]:
@@ -492,13 +518,21 @@ class TimerOCR:
         gray = np.array(crop)
         scale = max(2, int(round(180 / max(gray.shape[0], 1))))
         gray = cv2.resize(gray, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
-        gray = cv2.GaussianBlur(gray, (3, 3), 0)
+        blurred = cv2.GaussianBlur(gray, (3, 3), 0)
 
         variants: list[np.ndarray] = []
-        _, otsu = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        _, otsu_inv = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (35, 35))
+        top_hat = cv2.morphologyEx(gray, cv2.MORPH_TOPHAT, kernel)
+        top_hat = cv2.normalize(top_hat, None, 0, 255, cv2.NORM_MINMAX)
+        top_hat = cv2.GaussianBlur(top_hat, (3, 3), 0)
+        _, top_hat_binary = cv2.threshold(top_hat, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        variants.append(top_hat_binary)
+
+        _, otsu = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        _, otsu_inv = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
         adaptive = cv2.adaptiveThreshold(
-            gray,
+            blurred,
             255,
             cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
             cv2.THRESH_BINARY,
@@ -510,17 +544,40 @@ class TimerOCR:
 
         best_text = None
         best_score = -1.0
-        for variant in variants:
+        fast_scores: list[tuple[float, int]] = []
+        for index, variant in enumerate(variants):
             text, score = self._decode_fast_variant(variant)
+            fast_scores.append((score, index))
             if text and score >= 0.78:
                 return text, f"OCR: {score:.2f}"
 
+            if text and score > best_score:
+                best_text = text
+                best_score = score
+
+        slow_order = [index for score, index in sorted(fast_scores, reverse=True) if score >= 0.45]
+        if not slow_order:
+            slow_order = list(range(len(variants)))
+
+        for index in slow_order:
+            variant = variants[index]
             text, score = self._decode_variant(variant)
             if text and score > best_score:
                 best_text = text
                 best_score = score
                 if best_score >= 0.86:
                     return best_text, f"OCR: {best_score:.2f}"
+
+        if best_text is None:
+            for index, variant in enumerate(variants):
+                if index in slow_order:
+                    continue
+                text, score = self._decode_variant(variant)
+                if text and score > best_score:
+                    best_text = text
+                    best_score = score
+                    if best_score >= 0.86:
+                        return best_text, f"OCR: {best_score:.2f}"
 
         if best_text and best_score >= 0.72:
             return best_text, f"OCR: {best_score:.2f}"
