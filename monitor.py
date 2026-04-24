@@ -150,6 +150,7 @@ class ScreenMonitor:
 
         self.agent_live_times: dict[str, str] = {}
         self.agent_last_results: dict[str, str] = {}
+        self.round_start_live_times: dict[str, str] = {}
         self.best_result_name = ""
         self.best_result_time = ""
         self.best_result_ms: int | None = None
@@ -391,6 +392,7 @@ class ScreenMonitor:
         if clear_live_times:
             self.agent_live_times.clear()
         self.agent_last_results.clear()
+        self.round_start_live_times.clear()
         self.best_result_name = ""
         self.best_result_time = ""
         self.best_result_ms = None
@@ -406,6 +408,11 @@ class ScreenMonitor:
         now = time.time()
         with self.lock:
             self._clear_results_locked(clear_live_times=False)
+            self.round_start_live_times = {
+                name: live_time
+                for name, live_time in self.agent_live_times.items()
+                if live_time
+            }
             self.round_duration_seconds = duration
             self.round_end_at = now + duration
             self.round_active = True
@@ -442,6 +449,8 @@ class ScreenMonitor:
     def _register_result_locked(self, name: str, result_time: str):
         if not self._is_round_open_locked():
             return
+        if self.round_start_live_times.get(name) == result_time:
+            return
         if self.agent_last_results.get(name) == result_time:
             return
 
@@ -464,6 +473,8 @@ class ScreenMonitor:
             self.frames[name] = img_data
             self.dirty.add(name)
             self.agent_live_times[name] = time_text
+            if self.round_start_live_times.get(name) and time_text != self.round_start_live_times[name]:
+                self.round_start_live_times.pop(name, None)
             if result_time:
                 self._register_result_locked(name, result_time)
 

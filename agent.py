@@ -647,7 +647,7 @@ class ScreenAgent:
                 self.last_seen_text = time_text
                 self.stable_count = 1
 
-            if self.result_armed and self.stable_count >= 1:
+            if self.result_armed and self.stable_count >= 2:
                 self.pending_result_time = time_text
                 self.result_armed = False
                 self.last_emitted_result_text = time_text
