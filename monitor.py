@@ -78,6 +78,7 @@ class AgentConnection(threading.Thread):
         self.addr = addr
         self.monitor = monitor
         self.running = True
+        self.name = ""
         self.conn.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1024 * 1024)
 
     def recv_exact(self, size: int) -> bytes:
@@ -96,6 +97,9 @@ class AgentConnection(threading.Thread):
             while self.running:
                 name_len = struct.unpack("!I", self.recv_exact(4))[0]
                 name = self.recv_exact(name_len).decode("utf-8")
+                if self.name and name != self.name:
+                    self.monitor.rename_agent(self.name, name)
+                self.name = name
 
                 payload_len = struct.unpack("!I", self.recv_exact(4))[0]
                 payload = self.recv_exact(payload_len)
@@ -121,6 +125,17 @@ class AgentConnection(threading.Thread):
         finally:
             self.conn.close()
             self.monitor.remove_agent_by_connection(self)
+
+    def close(self):
+        self.running = False
+        try:
+            self.conn.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        try:
+            self.conn.close()
+        except OSError:
+            pass
 
 
 class ScreenMonitor:
@@ -153,6 +168,8 @@ class ScreenMonitor:
 
         self.agent_live_times: dict[str, str] = {}
         self.agent_last_results: dict[str, str] = {}
+        self.agent_best_results: dict[str, str] = {}
+        self.agent_best_ms: dict[str, int] = {}
         self.round_start_live_times: dict[str, str] = {}
         self.best_result_name = ""
         self.best_result_time = ""
@@ -165,6 +182,7 @@ class ScreenMonitor:
         self.root.title("Screen Monitor")
         self.root.configure(bg="#0a0a0a")
         self.root.geometry("1400x900")
+        self.fullscreen = False
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
         self.root.resizable(True, True)
 
@@ -207,6 +225,21 @@ class ScreenMonitor:
         self.fps_label.pack(side=tk.RIGHT, padx=10)
 
         tk.Frame(right_bar, width=1, bg="#222222").pack(side=tk.RIGHT, fill=tk.Y, padx=14)
+
+        tk.Button(
+            right_bar,
+            text="⛶",
+            font=("Segoe UI", 10),
+            width=3,
+            height=1,
+            command=self.toggle_fullscreen,
+            bg="#222222",
+            fg="#999999",
+            relief=tk.FLAT,
+            cursor="hand2",
+            activeforeground="#ffffff",
+            activebackground="#333333",
+        ).pack(side=tk.RIGHT, padx=(0, 8))
 
         tk.Button(
             right_bar,
@@ -354,12 +387,17 @@ class ScreenMonitor:
         self.canvas.bind("<Configure>", self._on_canvas_resize)
         self.canvas.bind("<Control-MouseWheel>", self._on_zoom_wheel)
         self.grid_frame.bind("<Control-MouseWheel>", self._on_zoom_wheel)
+        self.root.bind_all("<MouseWheel>", self._on_mouse_wheel)
+        self.root.bind_all("<Button-4>", self._on_mouse_wheel)
+        self.root.bind_all("<Button-5>", self._on_mouse_wheel)
 
         self.root.bind("<equal>", lambda event: self._zoom_in())
         self.root.bind("<KP_Add>", lambda event: self._zoom_in())
         self.root.bind("<minus>", lambda event: self._zoom_out())
         self.root.bind("<KP_Subtract>", lambda event: self._zoom_out())
         self.root.bind("0", lambda event: self._zoom_reset())
+        self.root.bind("<F11>", lambda event: self.toggle_fullscreen())
+        self.root.bind("<Escape>", lambda event: self.set_fullscreen(False))
         self.root.bind("<ButtonRelease-1>", self._on_drag_release_global)
 
         self.agent_widgets: dict[str, tuple] = {}
@@ -395,6 +433,8 @@ class ScreenMonitor:
         if clear_live_times:
             self.agent_live_times.clear()
         self.agent_last_results.clear()
+        self.agent_best_results.clear()
+        self.agent_best_ms.clear()
         self.round_start_live_times.clear()
         self.best_result_name = ""
         self.best_result_time = ""
@@ -462,6 +502,10 @@ class ScreenMonitor:
             return
 
         self.agent_last_results[name] = result_time
+        if name not in self.agent_best_ms or result_ms < self.agent_best_ms[name]:
+            self.agent_best_ms[name] = result_ms
+            self.agent_best_results[name] = result_time
+
         if self.best_result_ms is None or result_ms < self.best_result_ms:
             self.best_result_ms = result_ms
             self.best_result_time = result_time
@@ -485,6 +529,87 @@ class ScreenMonitor:
         with self.lock:
             if handler in self.connections:
                 self.connections.remove(handler)
+
+    def _replace_frame_key_locked(self, old_name: str, new_name: str):
+        if old_name not in self.frames:
+            return
+        if new_name in self.frames:
+            self.frames.pop(old_name, None)
+            return
+        self.frames = OrderedDict(
+            (new_name if name == old_name else name, frame)
+            for name, frame in self.frames.items()
+        )
+
+    def _move_key_locked(self, mapping: dict, old_name: str, new_name: str):
+        if old_name in mapping and new_name not in mapping:
+            mapping[new_name] = mapping[old_name]
+        mapping.pop(old_name, None)
+
+    def rename_agent(self, old_name: str, new_name: str):
+        if not old_name or not new_name or old_name == new_name:
+            return
+
+        with self.lock:
+            self._replace_frame_key_locked(old_name, new_name)
+            self._move_key_locked(self.agent_live_times, old_name, new_name)
+            self._move_key_locked(self.agent_last_results, old_name, new_name)
+            self._move_key_locked(self.agent_best_results, old_name, new_name)
+            self._move_key_locked(self.agent_best_ms, old_name, new_name)
+            self._move_key_locked(self.round_start_live_times, old_name, new_name)
+            self._move_key_locked(self.display_names, old_name, new_name)
+            self._move_key_locked(self.last_rendered_at, old_name, new_name)
+            if old_name in self.dirty:
+                self.dirty.discard(old_name)
+                self.dirty.add(new_name)
+            if self.best_result_name == old_name:
+                self.best_result_name = new_name
+        self._last_layout_names = ()
+
+    def _forget_agent_data_locked(self, name: str):
+        was_global_best = self.best_result_name == name
+        self.frames.pop(name, None)
+        self.dirty.discard(name)
+        self.agent_live_times.pop(name, None)
+        self.agent_last_results.pop(name, None)
+        self.agent_best_results.pop(name, None)
+        self.agent_best_ms.pop(name, None)
+        self.round_start_live_times.pop(name, None)
+        self.display_names.pop(name, None)
+        self.last_rendered_at.pop(name, None)
+        if was_global_best:
+            self._recompute_global_best_locked()
+
+    def _recompute_global_best_locked(self):
+        if not self.agent_best_ms:
+            self.best_result_name = ""
+            self.best_result_time = ""
+            self.best_result_ms = None
+            return
+
+        best_name, best_ms = min(self.agent_best_ms.items(), key=lambda item: item[1])
+        self.best_result_name = best_name
+        self.best_result_ms = best_ms
+        self.best_result_time = self.agent_best_results.get(best_name, "")
+
+    def _destroy_agent_widget(self, name: str):
+        widget = self.agent_widgets.pop(name, None)
+        if widget:
+            frame = widget[0]
+            if frame.winfo_exists():
+                frame.destroy()
+        self.photo_images.pop(name, None)
+
+    def remove_agent(self, name: str):
+        with self.lock:
+            handlers = [handler for handler in self.connections if handler.name == name]
+            self._forget_agent_data_locked(name)
+
+        for handler in handlers:
+            handler.close()
+
+        self._destroy_agent_widget(name)
+        self._last_layout_names = ()
 
     def _on_canvas_resize(self, event):
         width = event.width
@@ -510,6 +635,8 @@ class ScreenMonitor:
         menu.add_command(label="Переименовать", command=lambda: self._do_rename(name))
         if name in self.display_names:
             menu.add_command(label="Сбросить имя", command=lambda: self._reset_name(name))
+        menu.add_separator()
+        menu.add_command(label="Удалить подключение", command=lambda: self.remove_agent(name))
         menu.tk_popup(event.x_root, event.y_root)
 
     def _do_rename(self, name: str):
@@ -568,6 +695,25 @@ class ScreenMonitor:
             self.dirty.update(self.frames.keys())
         return "break"
 
+    def _on_mouse_wheel(self, event):
+        if getattr(event, "state", 0) & 0x0004:
+            return self._on_zoom_wheel(event)
+
+        if getattr(event, "num", None) == 4:
+            units = -3
+        elif getattr(event, "num", None) == 5:
+            units = 3
+        else:
+            delta = getattr(event, "delta", 0)
+            units = -int(delta / 120) if delta else 0
+            if units == 0 and delta:
+                units = -1 if delta > 0 else 1
+            units *= 3
+
+        if units:
+            self.canvas.yview_scroll(units, "units")
+        return "break"
+
     def _zoom_in(self):
         self.zoom_factor = min(3.0, self.zoom_factor + 0.25)
         self._update_zoom_display()
@@ -588,6 +734,13 @@ class ScreenMonitor:
 
     def _update_zoom_display(self):
         self.zoom_label.configure(text=f"{int(self.zoom_factor * 100)}%")
+
+    def set_fullscreen(self, enabled: bool):
+        self.fullscreen = bool(enabled)
+        self.root.attributes("-fullscreen", self.fullscreen)
+
+    def toggle_fullscreen(self):
+        self.set_fullscreen(not self.fullscreen)
 
     def _on_drag_start(self, event, name: str):
         self.drag_source_name = name
@@ -769,14 +922,25 @@ class ScreenMonitor:
 
         return frame, name_label, meta_label, img_label
 
-    def _build_meta_text(self, name: str, live_times: dict[str, str], accepted_times: dict[str, str]) -> tuple[str, str]:
+    def _build_meta_text(
+        self,
+        name: str,
+        live_times: dict[str, str],
+        last_times: dict[str, str],
+        best_times: dict[str, str],
+    ) -> tuple[str, str]:
         live_time = live_times.get(name, "")
-        accepted_time = accepted_times.get(name, "")
+        last_time = last_times.get(name, "")
+        best_time = best_times.get(name, "")
 
-        if live_time and accepted_time and live_time != accepted_time:
-            return f"OCR {live_time} | зачёт {accepted_time}", "#a6e3a1"
-        if accepted_time:
-            return f"Зачёт: {accepted_time}", "#a6e3a1"
+        if best_time and last_time and best_time != last_time:
+            if live_time and live_time != last_time:
+                return f"OCR {live_time} | посл. {last_time} | лучшее {best_time}", "#a6e3a1"
+            return f"Посл. {last_time} | лучшее {best_time}", "#a6e3a1"
+        if best_time:
+            if live_time and live_time != best_time:
+                return f"OCR {live_time} | лучшее {best_time}", "#a6e3a1"
+            return f"Лучшее: {best_time}", "#a6e3a1"
         if live_time:
             return f"OCR: {live_time}", "#f9e2af"
         return "Ожидание времени", "#666666"
@@ -805,7 +969,8 @@ class ScreenMonitor:
         with self.lock:
             names = list(self.frames.keys())
             live_times = dict(self.agent_live_times)
-            accepted_times = dict(self.agent_last_results)
+            last_times = dict(self.agent_last_results)
+            best_times = dict(self.agent_best_results)
             best_name = self.best_result_name
             best_time = self.best_result_time
 
@@ -820,6 +985,12 @@ class ScreenMonitor:
             with self.lock:
                 self.dirty.update(self.frames.keys())
 
+        stale_widgets = [name for name in self.agent_widgets if name not in names]
+        for name in stale_widgets:
+            self._destroy_agent_widget(name)
+        if stale_widgets:
+            layout_changed = True
+
         for name in names:
             if name not in self.agent_widgets:
                 self.agent_widgets[name] = self._create_agent_widget(name)
@@ -832,7 +1003,7 @@ class ScreenMonitor:
                 if name_label.cget("text") != expected:
                     name_label.configure(text=expected)
 
-                meta_text, meta_color = self._build_meta_text(name, live_times, accepted_times)
+                meta_text, meta_color = self._build_meta_text(name, live_times, last_times, best_times)
                 if meta_label.cget("text") != meta_text or meta_label.cget("fg") != meta_color:
                     meta_label.configure(text=meta_text, fg=meta_color)
 
@@ -907,7 +1078,7 @@ class ScreenMonitor:
         except Exception:
             pass
         for handler in self.connections:
-            handler.running = False
+            handler.close()
         self.root.destroy()
 
     def run(self):

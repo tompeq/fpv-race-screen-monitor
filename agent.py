@@ -626,6 +626,10 @@ class ScreenAgent:
         self._ocr_thread = threading.Thread(target=self._ocr_worker_loop, daemon=True)
         self._ocr_thread.start()
 
+    def set_name(self, name: str):
+        self.name = name
+        self.name_bytes = name.encode("utf-8")
+
     def set_time_callback(self, callback: Callable[[str, str], None]):
         self.time_callback = callback
 
@@ -783,9 +787,10 @@ class ScreenAgent:
             [M bytes] JPEG data
         """
         meta_bytes = json.dumps(metadata, ensure_ascii=False).encode("utf-8")
+        name_bytes = self.name_bytes
 
-        sock.sendall(struct.pack("!I", len(self.name_bytes)))
-        sock.sendall(self.name_bytes)
+        sock.sendall(struct.pack("!I", len(name_bytes)))
+        sock.sendall(name_bytes)
         sock.sendall(struct.pack("!I", len(meta_bytes)))
         sock.sendall(meta_bytes)
         sock.sendall(struct.pack("!I", len(frame_data)))
@@ -1055,6 +1060,8 @@ class AgentGUI:
             self.settings["timer_width"] = max(0, int(self.entries["timer_width"].get().strip()))
             self.settings["timer_height"] = max(0, int(self.entries["timer_height"].get().strip()))
             self._save_config()
+            if self.agent:
+                self.agent.set_name(self.settings["name"])
             if self.settings["timer_width"] > 0 and self.settings["timer_height"] > 0:
                 self._set_timer_display("", "Область сохранена, ждём OCR")
             else:
